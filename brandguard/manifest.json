@@ -1,0 +1,30 @@
+{
+  "id": "com.brandguard.preflight-variants",
+  "name": "BrandGuard — Preflight & Variants",
+  "version": "0.1.0",
+  "main": "index.html",
+  "manifestVersion": 5,
+  "host": {
+    "app": "PS",
+    "minVersion": "24.2.0"
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "brandguardPanel",
+      "label": { "default": "BrandGuard" },
+      "minimumSize": { "width": 300, "height": 420 },
+      "preferredDockedSize": { "width": 340, "height": 760 },
+      "preferredFloatingSize": { "width": 380, "height": 760 },
+      "icons": [
+        { "width": 23, "height": 23, "path": "icons/icon.png", "scale": [1, 2], "theme": ["all"] }
+      ]
+    }
+  ],
+  "requiredPermissions": {
+    "localFileSystem": "request"
+  },
+  "icons": [
+    { "width": 48, "height": 48, "path": "icons/plugin.png", "scale": [1, 2], "theme": ["all"], "species": ["pluginList"] }
+  ]
+}
