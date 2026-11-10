@@ -1,7 +1,7 @@
 {
   "id": "com.brandguard.preflight-variants",
   "name": "BrandGuard — Preflight & Variants",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "main": "index.html",
   "manifestVersion": 5,
   "host": {
@@ -12,19 +12,64 @@
     {
       "type": "panel",
       "id": "brandguardPanel",
-      "label": { "default": "BrandGuard" },
-      "minimumSize": { "width": 300, "height": 420 },
-      "preferredDockedSize": { "width": 340, "height": 760 },
-      "preferredFloatingSize": { "width": 380, "height": 760 },
+      "label": {
+        "default": "BrandGuard"
+      },
+      "minimumSize": {
+        "width": 230,
+        "height": 300
+      },
+      "preferredDockedSize": {
+        "width": 340,
+        "height": 760
+      },
+      "preferredFloatingSize": {
+        "width": 380,
+        "height": 760
+      },
       "icons": [
-        { "width": 23, "height": 23, "path": "icons/icon.png", "scale": [1, 2], "theme": ["all"] }
-      ]
+        {
+          "width": 23,
+          "height": 23,
+          "path": "icons/icon.png",
+          "scale": [
+            1,
+            2
+          ],
+          "theme": [
+            "all"
+          ]
+        }
+      ],
+      "maximumSize": {
+        "width": 2000,
+        "height": 3000
+      }
     }
   ],
   "requiredPermissions": {
-    "localFileSystem": "request"
+    "localFileSystem": "request",
+    "network": {
+      "domains": [
+        "https://api.anthropic.com"
+      ]
+    }
   },
   "icons": [
-    { "width": 48, "height": 48, "path": "icons/plugin.png", "scale": [1, 2], "theme": ["all"], "species": ["pluginList"] }
+    {
+      "width": 48,
+      "height": 48,
+      "path": "icons/plugin.png",
+      "scale": [
+        1,
+        2
+      ],
+      "theme": [
+        "all"
+      ],
+      "species": [
+        "pluginList"
+      ]
+    }
   ]
 }

@@ -5,10 +5,11 @@ const { applyFixToModel } = require('../src/core/rules');
 const { applyPlan } = require('../src/core/variants');
 const { sampleDoc } = require('./sample-doc');
 
-function createMockAdapter(initialDoc) {
+function createMockAdapter(initialDoc, opts) {
   let doc = initialDoc === undefined ? sampleDoc() : initialDoc;
   const log = [];
   let stored = null;
+  let settings = (opts && opts.settings) || {};
   return {
     log,
     setDoc(d) { doc = d; },
@@ -27,6 +28,10 @@ function createMockAdapter(initialDoc) {
     async pickFolder() { return { name: 'exports' }; },
     async loadSpec() { return stored; },
     async saveSpec(s) { stored = JSON.parse(JSON.stringify(s)); },
+    async loadSettings() { return settings; },
+    async saveSettings(st) { settings = JSON.parse(JSON.stringify(st)); log.push(['saveSettings']); },
+    async renderPreview() { return null; },
+    fetch: opts && opts.fetch,
     async importSpecFile() { return null; },
     async exportSpecFile() { return true; },
     onDocumentChange() { return () => {}; },

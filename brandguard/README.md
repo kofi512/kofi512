@@ -12,17 +12,25 @@ format you publish in.
 
 ## How variants are laid out
 
-1. Roles are inferred per layer (background, headline, body, CTA, logo, image, graphic) from names
-   (`logo`, `cta`, `bg`…), geometry and text size.
-2. One content scale is chosen so the content block fits the target's safe area.
-3. Every layer keeps the edge it was anchored to (left/right/top/bottom or centred).
-4. Backgrounds cover the canvas; full-width bars stretch; text and logos are clamped inside the safe zone
-   (per-format overrides, e.g. Story keeps the top 14 % and bottom 20 % clear).
-5. Layers that overlap in the source (a button and its label) move as one **cluster**; clusters that
-   collide after clamping are stacked apart again.
-6. Layouts that cannot work (extreme aspect ratios, new overlaps, text that would become tiny) are
-   **flagged, not hidden**. This is scale-and-anchor, not a full re-flow — a portrait → 1.91:1 conversion
-   will often need a hand-made layout and the panel tells you so.
+Every format is planned three ways, each plan is simulated and scored by the same preflight rules,
+and the best one is selected. You can switch any card between them.
+
+| Strategy | What it does |
+| --- | --- |
+| **Same design** | Scales the *whole* design uniformly and centres it; backgrounds are extended to fill the new canvas. Nothing is cropped or rearranged — the guaranteed-complete option. |
+| **Anchored** | Keeps each layer pinned to the edge it was nearest to (or centred) with margins scaled, so the new canvas is used better. Layers that were fully inside the source stay fully inside the target. |
+| **AI** | Claude looks at a picture of your design plus the layer list and proposes a re-flow per format (e.g. portrait → text column + product for landscape). The answer is validated: forgotten layers keep the same-design transform, backgrounds are forced to cover, content is pulled back into the safe zone, and it is scored against the other two. |
+
+Scoring punishes cut-off content hardest, then safe-zone / text-size / contrast problems and new
+overlaps, and rewards using more of the canvas. Layers that overlap in the source (a button and its
+label) always move as one cluster.
+
+### AI setup (optional)
+
+Brand tab → **AI layout**: paste an Anthropic API key and pick a model (default Claude Opus 5.5).
+The key is stored in the plugin's local storage, sent only to `api.anthropic.com`, and is never part of
+an exported brand spec. When you use AI, a JPEG of the open document and its layer names/text are sent.
+Without a key everything else still works.
 
 ## Layout
 
@@ -30,7 +38,7 @@ format you publish in.
 brandguard/
 ├── manifest.json        UXP v5 panel manifest
 ├── index.html / index.js / styles.css
-├── src/core/            pure JS, no Photoshop: color, spec, roles, rules (audit + fixes), variants
+├── src/core/            pure JS, no Photoshop: color, spec, roles, rules (audit + fixes), variants, ai
 ├── src/ui/app.js        the panel (renders strings, event delegation, no framework)
 ├── src/ps/adapter.js    the ONLY file that talks to Photoshop
 ├── dev/                 mock adapter, sample document, browser preview / UI smoke test
@@ -64,14 +72,15 @@ shake out adapter details on first load. The riskiest bits, in order:
 * **Solid-colour layers** — fill colour is read/written through `batchPlay` (`adjustment[0].color`).
 * **`Document.duplicate` + `resizeCanvas`** for variants, and re-positioning via `layer.bounds` + `translate`.
 * **Font names** — `setFont` needs a PostScript name Photoshop has installed (e.g. `Montserrat-Bold`).
-* **Layer scale for text** — text variants change font *size* rather than scaling the layer transform.
+* **Layer transforms** — variants scale every layer with `layer.scale(%, %)` (like Free Transform) and then translate using the re-read `layer.bounds`.
+* **AI preview image** — rendered with `imaging.getPixels` + `encodeImageData`; if that fails the AI step still works from layer data alone.
 
 Not done yet: Arabic/RTL text checks, real re-flow between very different aspect ratios, artboard
 output (variants are separate documents), per-layer role overrides in the UI.
 
 ## Install
 
-Download `dist/BrandGuard.ccx` (rebuild with `npm run package`), then either:
+Download `dist/BrandGuard.ccx` (v0.2.0; rebuild with `npm run package`), then either:
 
 * **Double-click the `.ccx`** — Creative Cloud installs it. Unsigned plugins may show an
   "unverified" notice; accept it. Then open *Plugins › BrandGuard* in Photoshop.

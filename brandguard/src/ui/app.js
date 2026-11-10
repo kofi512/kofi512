@@ -9,6 +9,7 @@ const { normalizeSpec, DEFAULT_SPEC, clone, safeRect } = require('../core/spec')
 const { audit, summarize, selectSafeFixes } = require('../core/rules');
 const { previewVariant } = require('../core/variants');
 const { inferRoles } = require('../core/roles');
+const ai = require('../core/ai');
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -35,6 +36,11 @@ function start(adapter, root) {
     previews: {}, // formatId -> previewVariant()
     picked: new Set(),
     exportPng: false,
+    settings: { apiKey: '', model: ai.DEFAULT_MODEL }, // AI settings; stored apart from the brand spec
+    aiLayouts: {}, // formatId -> { rationale, layers } from Claude
+    aiSig: '',
+    override: {}, // formatId -> 'fit' | 'anchor' | 'ai'
+    panelW: 340,
     busy: false,
     status: { kind: '', text: '' },
   };
@@ -51,7 +57,16 @@ function start(adapter, root) {
     state.findings = state.doc ? audit(state.doc, state.spec) : [];
     state.previews = {};
     if (state.doc) {
-      for (const f of state.spec.formats) state.previews[f.id] = previewVariant(state.doc, f, state.spec);
+      // AI answers belong to one document; drop them if a different one is opened.
+      const sig = `${state.doc.name}|${state.doc.width}x${state.doc.height}|${state.doc.layers.map((l) => l.id).join(',')}`;
+      if (sig !== state.aiSig) { state.aiSig = sig; state.aiLayouts = {}; state.override = {}; }
+      for (const f of state.spec.formats) {
+        let aiPlan;
+        if (state.aiLayouts[f.id]) {
+          try { aiPlan = ai.planFromAi(state.doc, f, state.spec, state.aiLayouts[f.id]); } catch (e) { aiPlan = undefined; }
+        }
+        state.previews[f.id] = previewVariant(state.doc, f, state.spec, { aiPlan });
+      }
     }
     // keep only formats that still exist
     state.picked = new Set([...state.picked].filter((id) => state.previews[id]));
@@ -120,6 +135,38 @@ function start(adapter, root) {
     setStatus('ok', total ? `Fixed ${total} issue${total === 1 ? '' : 's'}.` : 'Nothing to fix automatically.');
   }
 
+  /** The candidate layout currently selected for a format (user override, else best score). */
+  function chosen(f) {
+    const p = state.previews[f.id];
+    const k = state.override[f.id];
+    const key = k && p.candidates[k] ? k : p.best;
+    return { key, ...p.candidates[key], candidates: p.candidates, best: p.best };
+  }
+
+  async function askAi() {
+    if (!state.settings.apiKey) {
+      state.tab = 'brand';
+      setStatus('error', 'Add your Anthropic API key under “AI layout” first.');
+      renderAll();
+      return;
+    }
+    const formats = state.picked.size ? state.spec.formats.filter((f) => state.picked.has(f.id)) : state.spec.formats;
+    setStatus('busy', 'Rendering a preview of your design…');
+    let previewB64 = null;
+    try { previewB64 = await adapter.renderPreview(1024); } catch (e) { /* layer data alone still works */ }
+    setStatus('busy', `Asking Claude to lay out ${formats.length} format${formats.length === 1 ? '' : 's'}…`);
+    const out = await ai.requestLayouts({
+      apiKey: state.settings.apiKey, model: state.settings.model, doc: state.doc, formats,
+      spec: state.spec, previewB64, fetchImpl: adapter.fetch,
+    });
+    Object.assign(state.aiLayouts, out.byFormat);
+    for (const id of Object.keys(out.byFormat)) delete state.override[id];
+    recompute();
+    const got = formats.filter((f) => out.byFormat[f.id]);
+    const wins = got.filter((f) => state.previews[f.id].best === 'ai').length;
+    setStatus('ok', `AI laid out ${got.length} format${got.length === 1 ? '' : 's'}; it scored best on ${wins}. Switch any card between Same design / Anchored / AI.`);
+  }
+
   async function generate() {
     const formats = state.spec.formats.filter((f) => state.picked.has(f.id));
     if (!formats.length) return;
@@ -133,7 +180,7 @@ function start(adapter, root) {
     for (const f of formats) {
       setStatus('busy', `Creating ${f.name} (${made + 1}/${formats.length})…`);
       try {
-        await adapter.createVariant(state.previews[f.id].plan, { exportFolder: folder });
+        await adapter.createVariant(chosen(f).plan, { exportFolder: folder });
         made++;
       } catch (e) {
         problems.push(`${f.name}: ${(e && e.message) || e}`);
@@ -148,6 +195,26 @@ function start(adapter, root) {
   // ---------------------------------------------------------------- rendering
   function renderAll() {
     renderHdr(); renderTabs(); renderView(); renderFoot();
+    layout();
+  }
+
+  /**
+   * Size the scroll area to whatever the panel currently is. Done in JS (not only CSS) because
+   * percentage heights are unreliable in UXP panels, which is what stopped the panel from
+   * filling/extending when it was resized or docked.
+   */
+  function layout() {
+    const H = window.innerHeight || document.documentElement.clientHeight || 0;
+    const W = window.innerWidth || document.documentElement.clientWidth || 0;
+    if (!H) return;
+    root.style.height = `${H}px`;
+    const used = $('hdr').offsetHeight + $('tabs').offsetHeight + $('foot').offsetHeight;
+    const vh = `${Math.max(80, H - used)}px`;
+    if ($('view').style.height !== vh) $('view').style.height = vh;
+    if (W && Math.abs(W - state.panelW) > 8) {
+      state.panelW = W;
+      if (state.tab === 'variants' && state.doc && !state.busy) renderView();
+    }
   }
 
   function renderHdr() {
@@ -242,32 +309,49 @@ function start(adapter, root) {
       <i class="safe" style="${pos(sr)}"></i></div>`;
   }
 
+  const STRAT = { fit: 'Same design', anchor: 'Anchored', ai: 'AI' };
+
   function variantsView() {
     const d = state.doc;
     const fmts = state.spec.formats;
+    const ts = Math.max(64, Math.min(200, Math.round(state.panelW * 0.3)));
     const cards = fmts.map((f) => {
-      const p = state.previews[f.id];
+      const c = chosen(f);
       const on = state.picked.has(f.id);
-      const issues = p.findings.length + p.warnings.length;
-      const msgs = [...p.warnings.map((w) => w.message), ...p.findings.map((x) => `${x.layerName}: ${x.message}`)].slice(0, 2);
+      const issues = c.findings.length + c.warnings.length + c.notes.length;
+      const msgs = [...c.notes, ...c.warnings.map((x) => x.message), ...c.findings.map((x) => `${x.layerName}: ${x.message}`)].slice(0, 2);
+      const chips = ['fit', 'anchor', 'ai'].filter((k) => c.candidates[k]).map((k) =>
+        `<button class="strat${c.key === k ? ' on' : ''}" data-action="strat" data-id="${esc(f.id)}" data-k="${k}" title="${esc(c.candidates[k].label)} — score ${c.candidates[k].score}">${STRAT[k]}${c.best === k ? ' ★' : ''}</button>`).join('');
       return `<div class="card${on ? ' on' : ''}" data-action="toggle" data-id="${esc(f.id)}">
         <div class="check">${on ? '✓' : ''}</div>
-        <div class="thumb">${wire(p.result, p.plan, f, 64)}</div>
+        <div class="thumb" style="width:${ts + 8}px;height:${ts + 8}px">${wire(c.result, c.plan, f, ts)}</div>
         <div class="card-body">
           <div class="card-title">${esc(f.name)}</div>
           <div class="muted small">${f.width}×${f.height} · ${ratioLabel(f.width, f.height)}</div>
-          <div class="card-status ${issues ? 'warn' : 'ok'}">${issues ? `${issues} to review` : '✓ Layout looks safe'}</div>
+          <div class="strats">${chips}</div>
+          <div class="card-status ${issues ? 'warn' : 'ok'}">${issues ? `${issues} to review` : '✓ Whole design kept, layout safe'}</div>
+          ${c.key === 'ai' && state.aiLayouts[f.id] && state.aiLayouts[f.id].rationale ? `<div class="card-msg ai">✨ ${esc(state.aiLayouts[f.id].rationale)}</div>` : ''}
           ${msgs.map((m) => `<div class="card-msg">${esc(m)}</div>`).join('')}
         </div></div>`;
     }).join('');
 
+    const n = state.picked.size || fmts.length;
+    const hasKey = !!state.settings.apiKey;
+    const aiBox = `<div class="ai-box">
+        <div class="ai-title"><b>✨ AI layout</b><span class="muted small">${esc(state.settings.model)}</span></div>
+        <p class="hint">Every format already gets the best of <b>Same design</b> (whole design scaled, never cropped) and <b>Anchored</b>. AI looks at your design and re-flows it — e.g. portrait → two columns for landscape — keeping all content.</p>
+        ${hasKey
+          ? `<button class="btn primary" data-action="askai"${state.busy ? ' disabled' : ''}>Improve ${n} format${n === 1 ? '' : 's'} with AI</button>`
+          : '<button class="btn ghost" data-tab="brand">Add API key to enable AI</button>'}
+      </div>`;
+
     return `
       <div class="source">
-        <div class="thumb">${wire(d, null, null, 64)}</div>
+        <div class="thumb" style="width:${ts + 8}px;height:${ts + 8}px">${wire(d, null, null, ts)}</div>
         <div><div class="muted small">SOURCE</div><b>${esc(d.name)}</b>
           <div class="muted small">${d.width}×${d.height} · ${ratioLabel(d.width, d.height)}</div></div>
       </div>
-      <p class="hint">Each variant is re-laid out with anchors, then checked with the same preflight rules. Dashed box = safe zone.</p>
+      ${aiBox}
       <div class="bar">
         <button class="btn quiet" data-action="pickall">Select all</button>
         <button class="btn quiet" data-action="pickrec">Only clean</button>
@@ -314,6 +398,11 @@ function start(adapter, root) {
         <div class="row"><label class="grow">Colour mode<div class="muted small">expected document mode</div></label>
           <select class="in" data-field="colorMode">${['RGB', 'CMYK', 'Grayscale', ''].map((m) =>
             `<option value="${m}"${s.colorMode === m ? ' selected' : ''}>${m || 'Any'}</option>`).join('')}</select></div></section>
+      <section><h3>AI layout <span class="muted small">optional</span></h3>
+        <div class="row"><input class="in grow" type="password" data-field="ai-key" placeholder="Anthropic API key (sk-ant-…)" value="${esc(state.settings.apiKey)}"></div>
+        <div class="row"><select class="in grow" data-field="ai-model">${ai.MODELS.map((m) =>
+          `<option value="${m.id}"${state.settings.model === m.id ? ' selected' : ''}>${esc(m.label)}</option>`).join('')}</select></div>
+        <p class="hint">The key stays in this plugin's local storage and is only sent to api.anthropic.com. When you use AI, an image of the open document plus its layer names and text are sent. It is never saved in an exported brand spec.</p></section>
       <section><h3>Formats <span class="muted small">variant sizes in px</span></h3>${formats}
         <button class="btn quiet" data-action="fmt-add">+ Add format</button></section>
       ${state.specErrors.length ? `<div class="notice">${state.specErrors.map(esc).join('<br>')}</div>` : ''}`;
@@ -369,12 +458,14 @@ function start(adapter, root) {
       case 'picknone': state.picked = new Set(); renderTabs(); renderView(); renderFoot(); break;
       case 'pickrec':
         state.picked = new Set(state.spec.formats.filter((f) => {
-          const p = state.previews[f.id];
-          return !p.findings.length && !p.warnings.length;
+          const c = chosen(f);
+          return !c.findings.length && !c.warnings.length && !c.notes.length;
         }).map((f) => f.id));
         renderTabs(); renderView(); renderFoot();
         break;
       case 'generate': run('Creating variants…', generate); break;
+      case 'askai': run('Asking Claude…', askAi); break;
+      case 'strat': state.override[t.dataset.id] = t.dataset.k; renderView(); break;
       case 'pal-add': spec.palette.push({ name: 'New colour', hex: '#808080' }); setSpec(spec); renderAll(); break;
       case 'pal-del': spec.palette.splice(i, 1); setSpec(spec); renderAll(); break;
       case 'fmt-add': spec.formats.push({ id: `custom-${spec.formats.length + 1}`, name: 'Custom', width: 1080, height: 1080 }); setSpec(spec); renderAll(); break;
@@ -398,6 +489,12 @@ function start(adapter, root) {
     const field = t.dataset && t.dataset.field;
     if (!field) return;
     if (field === 'exportPng') { state.exportPng = t.checked; return; }
+    if (field === 'ai-key' || field === 'ai-model') {
+      if (field === 'ai-key') state.settings.apiKey = t.value.trim();
+      else state.settings.model = t.value;
+      Promise.resolve(adapter.saveSettings(state.settings)).catch(() => {});
+      return;
+    }
     const i = Number(t.dataset.i);
     const spec = clone(state.spec);
     const v = t.value;
@@ -421,6 +518,12 @@ function start(adapter, root) {
       const saved = await adapter.loadSpec();
       if (saved) setSpec(saved);
     } catch (e) { /* first run */ }
+    try {
+      const st = await adapter.loadSettings();
+      if (st) state.settings = Object.assign(state.settings, st);
+    } catch (e) { /* first run */ }
+    window.addEventListener('resize', layout);
+    setInterval(layout, 400); // belt and braces: some hosts do not fire resize when docking
     await scan();
     if (adapter.onDocumentChange) adapter.onDocumentChange(() => { if (!state.busy) scan(); });
   })();

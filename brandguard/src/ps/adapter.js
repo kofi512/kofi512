@@ -8,6 +8,8 @@
 //   createVariant(plan, {exportFolder}) -> { name }
 //   reactivateSource()              -> Promise
 //   pickFolder()                    -> folder | null
+//   renderPreview(maxSide)          -> base64 JPEG | null   (for the AI layout step)
+//   loadSettings() / saveSettings() -> { apiKey, model }   (kept out of the exportable spec)
 //   loadSpec() / saveSpec(spec)     -> localStorage
 //   importSpecFile() / exportSpecFile(spec)
 //   onDocumentChange(cb)            -> unsubscribe
@@ -19,9 +21,10 @@
 const photoshop = require('photoshop');
 const uxp = require('uxp');
 
-const { app, core, action, constants } = photoshop;
+const { app, core, action, constants, imaging } = photoshop;
 const fs = uxp.storage.localFileSystem;
 const SPEC_KEY = 'brandguard.spec.v1';
+const SETTINGS_KEY = 'brandguard.settings.v1'; // API key + model; never part of the exportable spec
 
 let sourceDoc = null; // the Photoshop Document the model was last read from
 
@@ -202,18 +205,12 @@ async function createVariant(plan, opts) {
     for (const p of plan.placements) {
       const layer = findLayer(dup, p.layerId);
       if (!layer) continue;
-      const isText = p.kind === 'text' && p.fontScale;
-      if (isText) {
-        const cs = layer.textItem.characterStyle;
-        cs.size = cs.size * p.fontScale;
-      } else {
-        const sx = p.scaleX * 100;
-        const sy = p.scaleY * 100;
-        if (Math.abs(sx - 100) > 0.01 || Math.abs(sy - 100) > 0.01) {
-          await layer.scale(sx, sy, constants.AnchorPosition.TOPLEFT);
-        }
-      }
-      // Re-read bounds and translate so the top-left lands exactly on the planned spot.
+      // Scale like Free Transform does — text, groups and smart objects all scale together with
+      // their boxes. (Changing font size instead would re-wrap paragraph text.)
+      const sx = p.scaleX * 100;
+      const sy = p.scaleY * 100;
+      if (Math.abs(sx - 100) > 0.01 || Math.abs(sy - 100) > 0.01) await layer.scale(sx, sy);
+      // Re-read the bounds and translate so the top-left lands exactly on the planned spot.
       const b = layer.bounds;
       await layer.translate(p.to.left - b.left, p.to.top - b.top);
     }
@@ -226,6 +223,28 @@ async function createVariant(plan, opts) {
   }, { commandName: `BrandGuard: ${format.name}` });
 
   return { name };
+}
+
+/** JPEG preview of the source document as base64 (for the AI layout step), or null. */
+async function renderPreview(maxSide) {
+  const doc = sourceDoc;
+  if (!doc || !imaging) return null;
+  try {
+    return await core.executeAsModal(async () => {
+      const k = Math.min(1, (maxSide || 1024) / Math.max(doc.width, doc.height));
+      const r = await imaging.getPixels({
+        documentID: doc.id,
+        targetSize: { width: Math.max(1, Math.round(doc.width * k)), height: Math.max(1, Math.round(doc.height * k)) },
+        colorSpace: 'RGB',
+        componentSize: 8,
+      });
+      const b64 = await imaging.encodeImageData({ imageData: r.imageData, base64: true });
+      if (r.imageData && r.imageData.dispose) r.imageData.dispose();
+      return b64;
+    }, { commandName: 'BrandGuard: render preview' });
+  } catch (e) {
+    return null; // the AI step still works from layer data alone
+  }
 }
 
 async function reactivateSource() {
@@ -250,6 +269,17 @@ async function loadSpec() {
 
 async function saveSpec(spec) {
   try { window.localStorage.setItem(SPEC_KEY, JSON.stringify(spec)); } catch (e) { /* ignore */ }
+}
+
+async function loadSettings() {
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) { return {}; }
+}
+
+async function saveSettings(settings) {
+  try { window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
 }
 
 async function importSpecFile() {
@@ -277,5 +307,5 @@ function onDocumentChange(cb) {
 
 module.exports = {
   readDocument, selectLayer, applyFixes, createVariant, reactivateSource, pickFolder,
-  loadSpec, saveSpec, importSpecFile, exportSpecFile, onDocumentChange,
+  loadSpec, saveSpec, loadSettings, saveSettings, renderPreview, importSpecFile, exportSpecFile, onDocumentChange,
 };

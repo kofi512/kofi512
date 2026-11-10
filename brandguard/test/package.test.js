@@ -17,6 +17,12 @@ test('manifest is a valid UXP v5 Photoshop panel', () => {
   assert.ok(manifest.entrypoints[0].minimumSize.width <= manifest.entrypoints[0].preferredDockedSize.width);
 });
 
+test('panel is resizable and only allowed to reach the Anthropic API', () => {
+  const ep = manifest.entrypoints[0];
+  assert.ok(ep.maximumSize.width >= 1000 && ep.maximumSize.height >= 1000, 'panel can be made large');
+  assert.deepEqual(manifest.requiredPermissions.network.domains, ['https://api.anthropic.com']);
+});
+
 test('every file the manifest and index.html reference exists (incl. @2x icons)', () => {
   const exists = (p) => assert.ok(fs.existsSync(path.join(root, p)), `${p} missing`);
   exists(manifest.main);

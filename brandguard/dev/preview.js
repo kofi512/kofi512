@@ -10,7 +10,7 @@ const root = path.join(__dirname, '..');
 const outDir = path.resolve(process.argv[2] || path.join(__dirname, 'out'));
 const files = [
   'src/core/color.js', 'src/core/spec.js', 'src/core/roles.js', 'src/core/rules.js',
-  'src/core/variants.js', 'src/ui/app.js', 'dev/sample-doc.js', 'dev/mock-adapter.js',
+  'src/core/variants.js', 'src/core/ai.js', 'src/ui/app.js', 'dev/sample-doc.js', 'dev/mock-adapter.js',
 ];
 
 function bundle() {
@@ -37,10 +37,12 @@ function bundle() {
 function build() {
   fs.mkdirSync(outDir, { recursive: true });
   const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+  const mockClaude = fs.readFileSync(path.join(__dirname, 'mock-claude.js'), 'utf8');
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}
-    body{width:340px;height:760px;margin:0}</style></head><body><div id="app"></div>
+    body{margin:0}</style></head><body><div id="app"></div>
+    <script>${mockClaude}</script>
     <script>${bundle()}
-    window.__mock = load('dev/mock-adapter.js').createMockAdapter();
+    window.__mock = load('dev/mock-adapter.js').createMockAdapter(undefined, { fetch: window.__fakeFetch });
     window.__panel = load('src/ui/app.js').start(window.__mock, document.getElementById('app'));
     </script></body></html>`;
   const file = path.join(outDir, 'preview.html');
@@ -68,10 +70,9 @@ async function main() {
   // 1. Preflight
   await shot('1-preflight.png');
   const stats = await text('.stat-n');
-  assert.deepEqual(stats.map(Number).every((n) => n >= 0), true);
   assert.ok(Number(stats[0]) >= 1, 'sample has an error');
 
-  // 2. Fix all safe issues -> only deletes/unsafe things remain
+  // 2. Fix all safe issues -> only manual items remain
   await page.click('[data-action="fixall"]');
   await page.waitForFunction(() => /Fixed \d+ issue/.test(document.querySelector('.status')?.textContent || ''));
   await shot('2-after-fix-all.png');
@@ -84,18 +85,66 @@ async function main() {
   await page.click('[data-action="pickall"]');
   await shot('3-variants.png');
   assert.equal((await page.$$('.card.on')).length, 8);
+  assert.ok((await page.$$('.strat')).length >= 16, 'every card offers Same design / Anchored');
+  const cut = await page.$$eval('.card-msg', (els) => els.map((e) => e.textContent).filter((t) => /cut off/.test(t)));
+  assert.deepEqual(cut, [], 'no variant crops the design');
+
+  // 3b. Choosing a strategy per card
+  await page.click('.card:nth-of-type(4) .strat[data-k="fit"]');
+  assert.ok(await page.$('.card:nth-of-type(4) .strat.on[data-k="fit"]'));
+
+  // 3c. AI flow: gated on an API key
+  assert.ok(await page.$('.ai-box [data-tab="brand"]'), 'AI is gated on an API key');
+  await page.click('.ai-box [data-tab="brand"]');
+  await page.fill('[data-field="ai-key"]', 'sk-ant-test');
+  await page.dispatchEvent('[data-field="ai-key"]', 'change');
+  await page.selectOption('[data-field="ai-model"]', 'claude-sonnet-5-5');
+  await page.dispatchEvent('[data-field="ai-model"]', 'change');
+  await page.click('[data-tab="variants"]');
+  await page.click('[data-action="askai"]');
+  await page.waitForFunction(() => /AI laid out 8 formats/.test(document.querySelector('.status')?.textContent || ''));
+  const call = await page.evaluate(() => {
+    const c = window.__fetchCalls[0];
+    const t = c.body.messages[0].content[0].text;
+    return { n: window.__fetchCalls.length, url: c.url, key: c.headers['x-api-key'], model: c.body.model, hasLayers: t.includes('"Headline"') };
+  });
+  assert.deepEqual(call, { n: 1, url: 'https://api.anthropic.com/v1/messages', key: 'sk-ant-test', model: 'claude-sonnet-5-5', hasLayers: true }, 'one request covers all formats');
+  assert.equal((await page.$$('.strat[data-k="ai"]')).length, 8, 'every card now has an AI option');
+  await page.click('.card:nth-of-type(4) .strat[data-k="ai"]');
+  assert.ok(await page.$('.card:nth-of-type(4) .card-msg.ai'), 'AI rationale is shown when AI is selected');
+  await shot('3b-variants-ai.png');
+  assert.equal(await page.evaluate(() => JSON.stringify(window.__mock.log).includes('sk-ant')), false, 'key never reaches adapter calls');
+
   await page.click('[data-action="generate"]');
   await page.waitForFunction(() => /Created 8 variants/.test(document.querySelector('.status')?.textContent || ''));
   const calls = await page.evaluate(() => window.__mock.log.filter((l) => l[0] === 'createVariant').map((l) => l[1]));
   assert.equal(calls.length, 8);
+
+  // 3d. The panel fills whatever size it is given (the "does not extend" bug)
+  for (const [W, H] of [[260, 480], [340, 760], [640, 1000], [900, 700]]) {
+    await page.setViewportSize({ width: W, height: H });
+    await page.waitForTimeout(600);
+    const m = await page.evaluate(() => {
+      const r = (id) => document.getElementById(id).getBoundingClientRect();
+      return { foot: r('foot'), view: r('view'), sw: document.documentElement.scrollWidth, sh: document.documentElement.scrollHeight };
+    });
+    assert.ok(Math.abs(m.foot.bottom - H) <= 1, `${W}x${H}: footer sits on the bottom edge (got ${m.foot.bottom})`);
+    assert.ok(m.view.height >= 80, `${W}x${H}: scroll area has room`);
+    assert.ok(m.sw <= W + 1, `${W}x${H}: no horizontal scrolling (${m.sw})`);
+    assert.ok(m.sh <= H + 1, `${W}x${H}: page itself does not scroll (${m.sh})`);
+  }
+  await page.setViewportSize({ width: 640, height: 1000 });
+  await page.waitForTimeout(600);
+  await shot('3c-wide-panel.png');
+  await page.setViewportSize({ width: 340, height: 760 });
+  await page.waitForTimeout(600);
 
   // 4. Brand
   await page.click('[data-tab="brand"]');
   await shot('4-brand.png');
   await page.fill('[data-field="safeMarginPct"]', '10');
   await page.dispatchEvent('[data-field="safeMarginPct"]', 'change');
-  const margin = await page.evaluate(() => window.__panel.state.spec.safeMarginPct);
-  assert.equal(margin, 10);
+  assert.equal(await page.evaluate(() => window.__panel.state.spec.safeMarginPct), 10);
 
   // 5. No-document state
   await page.evaluate(() => { window.__mock.setDoc(null); return window.__panel.scan(); });
