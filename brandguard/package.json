@@ -5,6 +5,7 @@
   "description": "Brand-aware Preflight + Variants panel for Photoshop (UXP)",
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
-    "preview": "node dev/preview.js"
+    "preview": "node dev/preview.js",
+    "package": "python3 scripts/package.py"
   }
 }

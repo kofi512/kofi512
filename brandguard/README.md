@@ -68,3 +68,12 @@ shake out adapter details on first load. The riskiest bits, in order:
 
 Not done yet: Arabic/RTL text checks, real re-flow between very different aspect ratios, artboard
 output (variants are separate documents), per-layer role overrides in the UI.
+
+## Install
+
+Download `dist/BrandGuard.ccx` (rebuild with `npm run package`), then either:
+
+* **Double-click the `.ccx`** — Creative Cloud installs it. Unsigned plugins may show an
+  "unverified" notice; accept it. Then open *Plugins › BrandGuard* in Photoshop.
+* **Or** load `manifest.json` from the folder with Adobe's UXP Developer Tool (*Add Plugin…* → *Load*),
+  which also shows error logs if something fails.
